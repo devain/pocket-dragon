@@ -5,18 +5,11 @@
   const PD = window.PD;
   if (!/[?&]lab\b/.test(location.search)) return;
 
-  const CFG = PD.CFG;
-  const BASE = Object.assign({}, CFG);
   PD.lab = { obstacles: false };
-
-  // Candidate feels that were compared while tuning (see README).
-  const PRESETS = {
-    'V1 (old)': { gravity: 1650, flapKick: -470, flapThrust: 0, flapThrustTime: 0, fallCarry: 0, riseCarry: 0, maxClimb: 470, climbDrag: 0, glideTerminal: 720, diveTerminal: 720, apexGravity: 1, flapPitchKick: 0, flapSurge: 0 },
-    Floaty: { gravity: 1300, flapKick: -250, flapThrust: 2000, flapThrustTime: 0.09, glideTerminal: 270, glideTime: 0.65, apexGravity: 0.45 },
-    Default: {},
-    Snappy: { gravity: 1750, flapKick: -380, flapThrust: 1500, flapThrustTime: 0.06, glideTerminal: 420, glideTime: 0.35, apexGravity: 0.7 },
-    Heavy: { gravity: 1550, flapKick: -200, flapThrust: 3400, flapThrustTime: 0.1, glideTerminal: 360, glideTime: 0.45, apexGravity: 0.6, riseCarry: 0.15 },
-  };
+  // Sliders edit the live dragon's resolved flight model (dragon.F).
+  const live = () => PD.game.dragon.F;
+  // Extra comparison preset applied on top of the current dragon.
+  const V1 = { gravity: 1650, flapKick: -470, flapThrust: 0, flapThrustTime: 0, fallCarry: 0, riseCarry: 0, maxClimb: 470, climbDrag: 0, glideTerminal: 720, diveTerminal: 720, apexGravity: 1, flapPitchKick: 0, flapSurge: 0 };
   const SLIDERS = [
     ['gravity', 800, 2400, 10], ['flapKick', -600, 0, 5], ['flapThrust', 0, 5000, 50],
     ['flapThrustTime', 0, 0.2, 0.005], ['fallCarry', 0, 1, 0.01], ['riseCarry', 0, 1, 0.01],
@@ -53,28 +46,24 @@
       const lab = document.createElement('label');
       lab.innerHTML = `<span>${k}</span><input type="range" min="${min}" max="${max}" step="${step}"><span class="ro"></span>`;
       const inp = lab.querySelector('input'), out = lab.querySelectorAll('span')[1];
-      inp.value = CFG[k];
-      out.textContent = CFG[k];
-      inp.addEventListener('input', () => { CFG[k] = +inp.value; out.textContent = inp.value; markPreset(null); });
+      inp.addEventListener('input', () => { live()[k] = +inp.value; out.textContent = inp.value; markPreset(null); });
       inputs[k] = { inp, out };
       sl.appendChild(lab);
     }
     const pr = el.querySelector('#lab-presets');
     const btns = {};
     function markPreset(name) { for (const n in btns) btns[n].classList.toggle('on', n === name); }
-    for (const name in PRESETS) {
+    const sync = () => { for (const k in inputs) { inputs[k].inp.value = live()[k]; inputs[k].out.textContent = live()[k]; } };
+    const add = (name, fn) => {
       const b = document.createElement('button');
       b.textContent = name;
-      b.addEventListener('click', () => {
-        Object.assign(CFG, BASE, PRESETS[name]);
-        for (const k in inputs) { inputs[k].inp.value = CFG[k]; inputs[k].out.textContent = CFG[k]; }
-        markPreset(name);
-        b.blur();
-      });
+      b.addEventListener('click', () => { fn(); sync(); markPreset(name); b.blur(); });
       btns[name] = b;
       pr.appendChild(b);
-    }
-    markPreset('Default');
+    };
+    for (const def of PD.Dragons.list) add(def.name, () => PD.game.setDragon(def));
+    add('V1 feel', () => Object.assign(live(), V1));
+    const wait = setInterval(() => { if (PD.game) { clearInterval(wait); sync(); markPreset(PD.game.def.name); } }, 50);
     const obs = el.querySelector('#lab-obs');
     obs.addEventListener('change', () => { PD.lab.obstacles = obs.checked; obs.blur(); });
 

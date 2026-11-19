@@ -20,7 +20,8 @@
       this.canvas = document.getElementById('canvas');
       this.ctx = this.canvas.getContext('2d', { alpha: false });
       this.audio = new PD.AudioEngine();
-      this.dragon = new PD.Dragon();
+      this.def = PD.Dragons.selected();
+      this.dragon = new PD.Dragon(this.def);
       this.field = new PD.Field();
       this.particles = new PD.Particles();
       this.texts = new PD.FloatTexts();
@@ -50,10 +51,14 @@
       this.trail = Array.from({ length: 22 }, () => ({ x: 0, y: 0, w: 0, on: false }));
       this.trailHead = 0;
       this.tip = { x: 0, y: 0 };
+      this.holding = false;     // flap input held down (abilities like hover)
+      this.orbsRun = 0;
+      this.fxTimer = 0;
 
       const $ = (id) => document.getElementById(id);
       this.ui = {
-        title: $('screen-title'), ready: $('screen-ready'), pause: $('screen-pause'), over: $('screen-over'),
+        title: $('screen-title'), ready: $('screen-ready'), pause: $('screen-pause'), over: $('screen-over'), select: $('screen-select'),
+        titleDragon: $('title-dragon'), btnDragons: $('btn-dragons'), btnSelectDone: $('btn-select-done'),
         readyText: $('ready-text'), readyHint: $('ready-hint'),
         titleBest: $('title-best'), overScore: $('over-score'), overBest: $('over-best'),
         newBest: $('new-best'), tip: $('over-tip'),
@@ -64,6 +69,7 @@
       this.resize();
       this.bindInput();
       this.bindUI();
+      this.select = new PD.DragonSelect(this);
       this.enterTitle();
       this.updateSoundButton();
 
@@ -105,6 +111,7 @@
       this.readyY = this.groundY * 0.46;
       this.bg = PD.Art.buildBackground(W, H, this.groundY, this.pr);
 
+      if (this.state === 'select' && this.select) this.select.layout();
       // Keep the dragon sensible if the window changes mid-session
       if (prevGround !== undefined) {
         if (this.state === 'title') { this.dragon.x = this.dragon.baseX = W / 2; }
@@ -125,17 +132,33 @@
         if (e.target.closest('button')) return;
         if (e.button !== undefined && e.button > 0) return;
         e.preventDefault();
+        this.holding = true;
         this.primary();
       });
+      const release = () => { this.holding = false; };
+      window.addEventListener('pointerup', release);
+      window.addEventListener('pointercancel', release);
       // iOS sometimes only unlocks audio on touchend/click
       ['touchend', 'click'].forEach((ev) => window.addEventListener(ev, unlock, { passive: true }));
 
+      const isFlapKey = (k) => k === 'Space' || k === 'ArrowUp' || k === 'KeyW' || k === 'Enter' || k === 'NumpadEnter';
+      window.addEventListener('keyup', (e) => { if (isFlapKey(e.code)) this.holding = false; });
       window.addEventListener('keydown', (e) => {
         const k = e.code;
+        if (this.state === 'select') {
+          if (k === 'ArrowLeft' || k === 'ArrowUp') { e.preventDefault(); this.select.step(-1); }
+          else if (k === 'ArrowRight' || k === 'ArrowDown') { e.preventDefault(); this.select.step(1); }
+          else if ((k === 'Space' || k === 'Enter' || k === 'NumpadEnter' || k === 'Escape') && !e.repeat) {
+            e.preventDefault(); this.audio.click(); this.enterTitle();
+          } else if (k === 'KeyM') { unlock(); this.toggleSound(); }
+          return;
+        }
+        if (k === 'KeyD' && this.state === 'title') { unlock(); this.enterSelect(); return; }
         if (k === 'Space' || k === 'ArrowUp' || k === 'KeyW' || k === 'Enter' || k === 'NumpadEnter') {
           e.preventDefault();
           if (e.repeat) return;
           unlock();
+          this.holding = true;
           this.primary();
         } else if (k === 'KeyP' || k === 'Escape') {
           e.preventDefault();
@@ -157,7 +180,7 @@
           this.last = performance.now();
         }
       });
-      window.addEventListener('blur', () => this.pause());
+      window.addEventListener('blur', () => { this.holding = false; this.pause(); });
       window.addEventListener('resize', () => this.resize());
       window.addEventListener('orientationchange', () => setTimeout(() => this.resize(), 120));
       this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -175,6 +198,8 @@
       on(this.ui.btnSound, () => this.toggleSound());
       on(this.ui.btnRestart, () => this.restart());
       on(this.ui.btnHome, () => { this.audio.click(); this.enterTitle(); });
+      on(this.ui.btnDragons, () => this.enterSelect());
+      on(this.ui.btnSelectDone, () => { this.audio.click(); this.enterTitle(); });
       // Buttons should never keep keyboard focus (Space would re-click them)
       document.querySelectorAll('button').forEach((b) => b.addEventListener('pointerdown', (e) => e.preventDefault()));
     }
@@ -197,9 +222,9 @@
 
     flap() {
       this.dragon.flap();
-      this.audio.flap(this.dragon.flapPower);
+      this.audio.flap(this.dragon.flapPower, this.def.sound);
       // Downwash appears as the wings sweep down, not on the tap itself.
-      this.washTimer = PD.Dragon.STROKE.raise + PD.Dragon.STROKE.down * 0.45;
+      this.washTimer = this.dragon.washDelay;
     }
 
     /** Air pushed down and back by a wingbeat. Stronger when pulling out of a dive. */
@@ -210,7 +235,7 @@
       const ox = -8 * k, oy = 18 * k;
       const x = d.x + ox * c - oy * s, y = d.y + ox * s + oy * c;
       this.particles.emit(K.ARC, x, y, {
-        vx: -60 - 40 * p, vy: 110 + 80 * p, life: 0.32, size: 14 * k, grow: 46, rot: d.rot, color: '#ffffff', drag: 3,
+        vx: -60 - 40 * p, vy: 110 + 80 * p, life: 0.32, size: 14 * k, grow: 46, rot: d.rot, color: this.def.fx.wash, drag: 3,
       });
       const n = Math.round(2 + 3 * p);
       for (let i = 0; i < n; i++) {
@@ -233,11 +258,13 @@
       if (d.dead) return;
       const tip = d.wingTip(this.tip);
       const air = Math.hypot(speed, d.vy);
-      const stroking = d.stroke >= 0 && d.stroke < PD.Dragon.STROKE.raise + PD.Dragon.STROKE.down;
+      const stroking = d.stroking;
       const w = clamp((stroking ? 0.75 : 0) + (air - 240) / 700 + (1 - d.glide) * 0.25, 0, 1);
       const p = this.trail[this.trailHead];
       this.trailHead = (this.trailHead + 1) % this.trail.length;
       p.x = tip.x; p.y = tip.y; p.w = w; p.on = w > 0.02;
+
+      this.characterFx(dt, tip, air);
 
       // Rushing-air streaks in a committed dive
       if (d.vy > 480 && this.state === 'playing') {
@@ -251,11 +278,74 @@
       }
     }
 
+    /** Per-dragon ambient particles (snow, embers, stardust) + hover magic. */
+    characterFx(dt, tip, air) {
+      const d = this.dragon, sp = this.def.fx.sparkle;
+      if (d.hovering) {
+        this.fxTimer -= dt;
+        if (this.fxTimer <= 0) {
+          this.fxTimer = 0.03;
+          const a = rand(0, Math.PI * 2);
+          this.particles.emit(K.STAR, d.x + Math.cos(a) * 26, d.y + 16 + Math.sin(a) * 7, {
+            vy: rand(20, 60), vx: -this.speed * 0.3, life: rand(0.35, 0.6), size: rand(2.5, 4.5),
+            color: PD.pick(sp ? sp.colors : ['#fff']), vr: rand(-4, 4), add: true,
+          });
+        }
+        return;
+      }
+      if (!sp) return;
+      this.fxTimer -= dt;
+      if (this.fxTimer > 0) return;
+      // More particles when moving fast or beating the wings
+      this.fxTimer = sp.rate * (d.stroking ? 0.5 : 1) / (0.6 + Math.min(1, air / 600));
+      if (sp.kind === 'EMBER') {
+        // Sparks shed by the flame at the tail tip
+        const c = Math.cos(d.rot), s = Math.sin(d.rot), k = d.scale;
+        const lx = -40, ly = -10 + d.tail * 9;
+        this.particles.emit(K.SPARK, d.x + (lx * c - ly * s) * k, d.y + (lx * s + ly * c) * k, {
+          vx: rand(-70, -20), vy: rand(-70, -20), life: rand(0.3, 0.55), size: rand(1.5, 2.8),
+          color: PD.pick(sp.colors), g: -40, drag: 1.5, add: true,
+        });
+      } else {
+        this.particles.emit(K.STAR, tip.x + rand(-4, 4), tip.y + rand(-4, 4), {
+          vx: rand(-40, -10), vy: rand(-10, 30), life: rand(0.4, 0.75), size: rand(1.8, 3.6),
+          color: PD.pick(sp.colors), vr: rand(-3, 3), drag: 1.5,
+        });
+      }
+    }
+
+    /** Ability meter: a small arc above the dragon while it isn't full. */
+    drawAbility(g) {
+      const d = this.dragon;
+      if (!d.ability || d.dead || this.state !== 'playing') return;
+      if (d.energy >= 0.999 && !d.hovering) return;
+      const x = d.x, y = d.y - 38 * d.scale / CFG.playScale * 0.72 - 6;
+      const R = 9;
+      g.save();
+      g.lineCap = 'round';
+      g.lineWidth = 6;
+      g.strokeStyle = 'rgba(43,29,58,0.55)';
+      g.beginPath(); g.arc(x, y, R, 0, Math.PI * 2); g.stroke();
+      g.lineWidth = 3.4;
+      g.strokeStyle = d.hovering ? '#fff6c8' : (d.energy > 0.25 ? this.def.look.palette.gem || '#9ff3ff' : '#ff8a8a');
+      g.beginPath(); g.arc(x, y, R, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * d.energy); g.stroke();
+      g.restore();
+      if (d.hovering) {
+        // shimmering halo under the wings
+        g.save();
+        g.globalCompositeOperation = 'lighter';
+        g.globalAlpha = 0.35 + 0.15 * Math.sin(this.time * 20);
+        const R2 = 46 * d.scale;
+        g.drawImage(this.sprites.fireGlow, d.x - R2, d.y - R2 * 0.6, R2 * 2, R2 * 1.6);
+        g.restore();
+      }
+    }
+
     drawTrail(g) {
       const tr = this.trail, n = tr.length;
       g.save();
       g.lineCap = 'round';
-      g.strokeStyle = '#ffffff';
+      g.strokeStyle = this.def.fx.trail;
       // oldest -> newest
       let prev = null;
       for (let i = 0; i < n; i++) {
@@ -303,14 +393,38 @@
     }
 
     showScreen(name) {
-      for (const n of ['title', 'ready', 'pause', 'over']) this.ui[n].classList.toggle('show', n === name);
+      for (const n of ['title', 'ready', 'pause', 'over', 'select']) this.ui[n].classList.toggle('show', n === name);
+    }
+
+    setDragon(def) {
+      this.def = def;
+      PD.Dragons.select(def.id);
+      this.dragon.setDef(def);
+      this.ui.titleDragon.textContent = def.name;
+    }
+
+    enterSelect() {
+      if (this.state !== 'title') return;
+      this.audio.click();
+      this.setState('select');
+      this.clearTrail();
+      this.showScreen('select');
+      this.select.open();
+    }
+
+    readyHint() {
+      return this.def.ability && this.def.ability.type === 'hover'
+        ? 'Tap to fly · hold to hover' : 'Tap, click or press Space to fly';
     }
 
     enterTitle() {
+      if (this.select) this.select.close();
       this.resetRun();
       this.setState('title');
+      this.dragon.setDef(this.def);
       this.dragon.reset(this.W / 2, this.groundY * 0.52, CFG.titleScale);
       this.ui.titleBest.textContent = this.best;
+      this.ui.titleDragon.textContent = this.def.name;
       this.showScreen('title');
       this.audio.setMusicLevel(0.5);
     }
@@ -325,6 +439,7 @@
       this.shake = 0;
       this.flashA = 0;
       this.gameOverShown = false;
+      this.orbsRun = 0;
       this.field.reset();
       this.particles.clear();
       this.texts.clear();
@@ -344,7 +459,7 @@
       this.resetRun();
       this.dragon.reset(this.playX, this.readyY, CFG.playScale);
       this.ui.readyText.textContent = 'Get Ready!';
-      this.ui.readyHint.textContent = 'Tap, click or press Space to fly';
+      this.ui.readyHint.textContent = this.readyHint();
       this.showScreen('ready');
       this.setState('ready');
       this.audio.setMusicLevel(0.5);
@@ -360,6 +475,7 @@
     pause() {
       if (this.state !== 'playing' && this.state !== 'ready') return;
       this.prevState = this.state;
+      this.holding = false;
       this.setState('paused');
       this.showScreen('pause');
       this.audio.setMusicLevel(0.15);
@@ -404,11 +520,15 @@
 
     enterGameOver() {
       this.setState('gameover');
+      const snap = PD.Unlocks.snapshot();
       const newBest = this.score > this.best;
       if (newBest) {
         this.best = this.score;
         PD.storage.set('pd_best', this.best);
       }
+      if (this.score > PD.Dragons.bestFor(this.def.id)) PD.Dragons.setBestFor(this.def.id, this.score);
+      PD.Unlocks.recordRun(this.orbsRun);
+      const fresh = PD.Unlocks.newSince(snap);
       this.ui.overScore.textContent = this.score;
       this.ui.overBest.textContent = this.best;
       this.ui.newBest.classList.toggle('show', newBest && this.score > 0);
@@ -416,6 +536,7 @@
       if (newBest && this.score > 0) tip = 'A new legend takes flight!';
       else if (this.best - this.score <= 3 && this.best > 0) tip = `So close! ${this.best - this.score + 1} more to beat your best.`;
       else tip = PD.pick(TIPS);
+      if (fresh.length) tip = `New dragon unlocked: ${fresh.map((d) => d.name).join(', ')}!`;
       this.ui.tip.textContent = tip;
       this.showScreen('over');
       this.audio.gameOver();
@@ -436,6 +557,7 @@
         this.update(step);
         this.acc -= step;
       }
+      if (this.state === 'select') this.select.update(dt);
       this.updateWind();
       this.render();
     }
@@ -452,6 +574,7 @@
         level = 0.08;
       }
       this.audio.setWind(level, bright);
+      this.audio.setHover(this.state === 'playing' && d.hovering);
     }
 
     update(dt) {
@@ -466,9 +589,9 @@
       const s = this.state;
       const d = this.dragon;
       let speed = 0;
-      if (s === 'title') speed = 70;
+      if (s === 'title' || s === 'select') speed = 70;
       else if (s === 'ready') speed = 90;
-      else if (s === 'playing' && !this.frozen) speed = PD.Field.speedFor(this.passed);
+      else if (s === 'playing' && !this.frozen) speed = PD.Field.speedFor(this.passed) * d.F.speedMul;
       this.speed = speed;
       this.scroll += speed * dt;
 
@@ -484,7 +607,7 @@
           break;
         case 'playing':
           if (this.frozen) { d.updateIdle(dt); break; }
-          d.updateFly(dt, speed);
+          d.updateFly(dt, speed, this.holding);
           this.flightFx(dt, speed);
           this.field.update(dt, speed, this.passed, this.W, this.groundY);
           this.collectOrbs(dt);
@@ -560,6 +683,7 @@
         }
         if (dist < CFG.orbCollectR) {
           b.dead = true;
+          this.orbsRun++;
           this.combo = this.comboTimer > 0 ? this.combo + 1 : 0;
           this.comboTimer = CFG.comboWindow;
           this.addScore(1);
@@ -623,12 +747,15 @@
         g.drawImage(this.sprites.fireGlow, d.x - R, d.y - R, R * 2, R * 2);
         g.restore();
       }
-      PD.Art.drawDragon(g, d.renderState(false));
-      if (d.flash > 0) {
-        g.save();
-        g.globalAlpha = d.flash;
-        PD.Art.drawDragon(g, d.renderState(true));
-        g.restore();
+      if (this.state !== 'select') {
+        PD.Art.drawDragon(g, d.renderState(false));
+        if (d.flash > 0) {
+          g.save();
+          g.globalAlpha = d.flash;
+          PD.Art.drawDragon(g, d.renderState(true));
+          g.restore();
+        }
+        this.drawAbility(g);
       }
 
       this.particles.draw(g, this.sprites, true);

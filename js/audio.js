@@ -164,14 +164,73 @@
 
     // --- Sound effects ---------------------------------------------------------
     /** power ~0.4 (lazy beat at the apex) .. 1.4 (hauling out of a dive). */
-    flap(power) {
+    flap(power, sound) {
       if (!this.ready) return;
       const pw = power == null ? 1 : power;
+      const kind = (sound && sound.flap) || 'leather';
+      const pm = (sound && sound.pitch) || 1;
       const t = this.ctx.currentTime;
-      const p = PD.rand(0.93, 1.07);
-      // Leathery whoosh on the downstroke, a soft body thump under it.
-      this.noise(t + 0.02, 0.16, { filter: 'bandpass', freq: (1500 - 300 * pw) * p, freqTo: 320, q: 1.1, vol: 0.2 + 0.12 * pw, attack: 0.02 });
-      this.tone((230 - 40 * pw) * p, t + 0.025, 0.1, { type: 'sine', slideTo: 105, vol: 0.1 + 0.07 * pw, attack: 0.01 });
+      const p = PD.rand(0.93, 1.07) * pm;
+      switch (kind) {
+        case 'airy': // Frost: soft feathered swoosh, barely any body
+          this.noise(t + 0.03, 0.26, { filter: 'bandpass', freq: 2200 * p, freqTo: 700, q: 0.7, vol: 0.16 + 0.08 * pw, attack: 0.05 });
+          this.tone(520 * p, t + 0.04, 0.22, { type: 'sine', slideTo: 420 * p, vol: 0.025, send: this.echo });
+          break;
+        case 'punch': // Blaze: heavy whump with a crackle
+          this.noise(t + 0.01, 0.13, { filter: 'lowpass', freq: 1600 * p, freqTo: 200, q: 0.8, vol: 0.28 + 0.14 * pw, attack: 0.008 });
+          this.tone(150 * p, t + 0.015, 0.14, { type: 'triangle', slideTo: 60, vol: 0.2 + 0.08 * pw, attack: 0.006 });
+          this.noise(t + 0.05, 0.06, { filter: 'highpass', freq: 3500, q: 0.7, vol: 0.06 });
+          break;
+        case 'shimmer': // Mystic: two quick flutters + a tiny chime
+          for (let i = 0; i < 2; i++) {
+            this.noise(t + 0.02 + i * 0.085, 0.09, { filter: 'bandpass', freq: 1700 * p, freqTo: 600, q: 1.3, vol: 0.13 + 0.05 * pw, attack: 0.012 });
+          }
+          this.tone(1318 * p, t + 0.03, 0.18, { type: 'sine', vol: 0.035, send: this.echo });
+          this.tone(1760 * p, t + 0.11, 0.18, { type: 'sine', vol: 0.03, send: this.echo });
+          break;
+        default: // Emerald: leathery whoosh on the downstroke, a soft body thump under it
+          this.noise(t + 0.02, 0.16, { filter: 'bandpass', freq: (1500 - 300 * pw) * p, freqTo: 320, q: 1.1, vol: 0.2 + 0.12 * pw, attack: 0.02 });
+          this.tone((230 - 40 * pw) * p, t + 0.025, 0.1, { type: 'sine', slideTo: 105, vol: 0.1 + 0.07 * pw, attack: 0.01 });
+      }
+    }
+
+    /** Dragon picked on the select screen: a short signature motif. */
+    select(def) {
+      if (!this.ready) return;
+      const t = this.ctx.currentTime;
+      const motifs = {
+        emerald: [[523, 0], [659, 0.08], [784, 0.16]],
+        frost: [[784, 0], [988, 0.12], [1175, 0.24]],
+        blaze: [[262, 0], [392, 0.06], [523, 0.12], [784, 0.18]],
+        mystic: [[880, 0], [1109, 0.07], [1319, 0.14], [1760, 0.21]],
+      };
+      const type = def.id === 'blaze' ? 'square' : def.id === 'frost' ? 'sine' : 'triangle';
+      for (const [f, dt] of motifs[def.id] || motifs.emerald) {
+        this.tone(f, t + dt, 0.22, { type, vol: type === 'square' ? 0.05 : 0.1, send: this.echo });
+      }
+    }
+
+    /** Hover hum (Mystic): a soft, wobbling buzz while the ability is active. */
+    setHover(on) {
+      if (!this.ready || on === this._hoverOn) return;
+      this._hoverOn = on;
+      const ctx = this.ctx, t = ctx.currentTime;
+      if (on) {
+        const o = ctx.createOscillator(), lfo = ctx.createOscillator(), lg = ctx.createGain(), g = ctx.createGain();
+        o.type = 'triangle'; o.frequency.value = 660;
+        lfo.frequency.value = 23; lg.gain.value = 30;
+        lfo.connect(lg); lg.connect(o.frequency);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.05, t + 0.08);
+        o.connect(g); g.connect(this.sfx); g.connect(this.echo);
+        o.start(t); lfo.start(t);
+        this._hum = { o, lfo, g };
+      } else if (this._hum) {
+        const h = this._hum;
+        h.g.gain.setTargetAtTime(0.0001, t, 0.05);
+        h.o.stop(t + 0.4); h.lfo.stop(t + 0.4);
+        this._hum = null;
+      }
     }
 
     /** level 0..1 loudness, bright 0..1 pitch of the rushing air. */

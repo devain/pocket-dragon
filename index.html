@@ -32,8 +32,19 @@
       </h1>
       <div class="title-bottom">
         <div class="tap-hint">Tap to Start</div>
+        <button id="btn-dragons" class="pill-btn" aria-label="Choose your dragon" title="Choose dragon (D)">
+          <span class="pill-label">Dragon</span><b id="title-dragon">Emerald</b><span class="pill-arrow" aria-hidden="true">›</span>
+        </button>
         <div class="title-best">Best <b id="title-best">0</b></div>
         <div class="controls-hint">Space · Click · Tap to flap</div>
+      </div>
+    </section>
+
+    <section id="screen-select" class="screen" aria-label="Choose your dragon">
+      <div id="select-wrap" class="select-wrap">
+        <h2 class="select-title">Choose your dragon</h2>
+        <div id="dragon-cards" class="cards" role="radiogroup" aria-label="Dragons"></div>
+        <button id="btn-select-done" class="btn btn-big">Let's fly!</button>
       </div>
     </section>
 
@@ -78,8 +89,11 @@
   <script src="js/config.js"></script>
   <script src="js/audio.js"></script>
   <script src="js/art.js"></script>
+  <script src="js/dragon-art.js"></script>
+  <script src="js/dragons.js"></script>
   <script src="js/entities.js"></script>
   <script src="js/game.js"></script>
+  <script src="js/select.js"></script>
   <script src="js/lab.js"></script>
   <script src="js/main.js"></script>
 </body>
