@@ -87,11 +87,13 @@
   // ---------------------------------------------------------------------------
   // Dragon
   // ---------------------------------------------------------------------------
-  function drawWing(g, wingT, px, py, back, tint) {
+  function drawWing(g, wingT, px, py, back, tint, fold) {
     g.save();
     g.translate(px, py);
     g.rotate(PD.lerp(0.32, -1.5, wingT));
     if (back) g.scale(0.86, 0.86);
+    // fold: 0 = membrane fully open (power stroke), 1 = tucked (recovery / dive)
+    if (fold) g.scale(1 - 0.3 * fold, 1 - 0.42 * fold);
     // Membrane
     g.beginPath();
     g.moveTo(2, 3);
@@ -157,13 +159,16 @@
     g.lineWidth = 2.6;
 
     // Far wing (slightly lagging the near wing for depth)
-    drawWing(g, PD.clamp(d.wingT * 0.92 + 0.04, 0, 1), -9, -9, true, T);
+    const lag = d.wingLag == null ? d.wingT : d.wingLag;
+    drawWing(g, PD.clamp(lag * 0.92 + 0.04, -0.1, 1.05), -9, -9, true, T, d.fold || 0);
     g.strokeStyle = T ? '#fff' : OUT;
     g.lineWidth = 2.6;
 
     // Tail
-    const sw = Math.sin(t * 4.2) * 3;
-    const tx = -36, ty = -8 + sw;
+    // Tail sways gently and trails the motion (drags down on climbs, lifts in dives).
+    const tl = d.tail || 0;
+    const sw = Math.sin(t * 4.2) * 3 * (1 - Math.min(1, Math.abs(tl)) * 0.5);
+    const tx = -36 + Math.abs(tl) * 2, ty = -8 + sw + tl * 9;
     g.beginPath();
     g.moveTo(-12, -4);
     g.quadraticCurveTo(-26, 0, tx, ty);
@@ -236,7 +241,7 @@
     g.stroke();
 
     // Near wing
-    drawWing(g, d.wingT, -4, -8, false, T);
+    drawWing(g, d.wingT, -4, -8, false, T, d.fold || 0);
     g.strokeStyle = T ? '#fff' : OUT;
     g.lineWidth = 2.6;
 

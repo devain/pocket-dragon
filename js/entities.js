@@ -16,8 +16,18 @@
     }
 
     reset(x, y, scale) {
-      this.x = x; this.y = y; this.vy = 0; this.rot = 0; this.scale = scale;
-      this.wingPhase = 0; this.wingT = 0.4; this.flapBoost = 0; this.squash = 0;
+      this.x = x; this.y = y; this.vy = 0; this.rot = 0; this.rotV = 0; this.scale = scale;
+      this.baseX = x; this.surge = 0; this.surgeV = 0;
+      // Flight
+      this.thrust = 0;        // seconds of downstroke thrust left
+      this.stamina = 1;       // glide stamina: 1 = wings fully spread, 0 = tucked dive
+      this.sinceFlap = 9;
+      this.flapPower = 1;     // how hard the last flap had to work (for FX/audio)
+      // Wings: stroke time (-1 = passive), pose, fold, lagged far wing
+      this.stroke = -1; this.wingT = 0.45; this.wingV = 0; this.fold = 0; this.wingLag = 0.45;
+      this.tail = 0; this.tailV = 0;
+      this.hoverClock = 0;
+      this.squash = 0;
       this.blink = 0; this.blinkTimer = rand(1.5, 3.5);
       this.happy = 0; this.flash = 0; this.glow = 0; this.time = 0;
       this.dead = false; this.grounded = false; this.spin = 0;
@@ -29,15 +39,39 @@
       return this.happy > 0 ? 'happy' : 'normal';
     }
 
+    /** 0 = wings fully spread gliding, 1 = tucked dive. */
+    get glide() {
+      // Stays fully spread for the first part of the descent, then tucks.
+      const s = Math.min(1, this.stamina / (1 - CFG.glideHold));
+      return s * s * (3 - 2 * s);
+    }
+
+    /**
+     * A wingbeat: an instant kick (responsiveness) followed by a short
+     * downstroke of thrust (weight). Some existing momentum carries over, so
+     * flapping out of a dive feels different from flapping at the apex.
+     */
     flap() {
-      this.vy = CFG.flapVelocity;
-      this.flapBoost = 1;
-      this.wingPhase = 0;
+      const c = CFG;
+      const before = this.vy;
+      this.vy = (this.vy > 0 ? this.vy * c.fallCarry : this.vy * c.riseCarry) + c.flapKick;
+      if (this.vy < -c.maxClimb) this.vy = -c.maxClimb;
+      this.thrust = c.flapThrustTime;
+      this.stamina = 1;
+      this.sinceFlap = 0;
+      this.flapPower = clamp(0.6 + before / 900, 0.4, 1.4);
+      this.startStroke();
       this.squash = 1;
+      this.surgeV += c.flapSurge;
+      this.rotV -= c.flapPitchKick;
+    }
+
+    startStroke() {
+      this.stroke = 0;
     }
 
     tweenTo(x, scale, dur) {
-      this.tween = { fx: this.x, fs: this.scale, tx: x, ts: scale, t: 0, d: dur };
+      this.tween = { fx: this.baseX, fs: this.scale, tx: x, ts: scale, t: 0, d: dur };
     }
 
     _common(dt) {
@@ -46,7 +80,7 @@
         const tw = this.tween;
         tw.t += dt;
         const k = PD.easeOutCubic(clamp(tw.t / tw.d, 0, 1));
-        this.x = lerp(tw.fx, tw.tx, k);
+        this.x = this.baseX = lerp(tw.fx, tw.tx, k);
         this.scale = lerp(tw.fs, tw.ts, k);
         if (tw.t >= tw.d) this.tween = null;
       }
@@ -59,37 +93,141 @@
       this.squash = Math.max(0, this.squash - dt * 6);
     }
 
-    _wings(dt, speed) {
-      this.wingPhase += dt * (speed + this.flapBoost * 34);
-      this.flapBoost = Math.max(0, this.flapBoost - dt * 4);
-      this.wingT = 0.5 - 0.5 * Math.cos(this.wingPhase);
+    /**
+     * Wing pose. During a stroke we follow keyframes (quick raise, powerful
+     * downstroke with the membrane fully open, folded recovery). Otherwise the
+     * wings settle into a pose that reads the airflow: spread for gliding,
+     * swept up and half-folded for a dive, with a flutter that grows with speed.
+     */
+    _wings(dt, airspeed) {
+      const W = Dragon.STROKE;
+      let target, fold, stiff = 260;
+      if (this.stroke >= 0) {
+        this.stroke += dt;
+        const s = this.stroke;
+        if (s < W.raise) {
+          // snap up, folded slightly so the upstroke slices the air
+          const k = s / W.raise;
+          this.wingT = lerp(this.wingT, 1, k * k);
+          this.fold = lerp(this.fold, 0.35, k);
+        } else if (s < W.raise + W.down) {
+          const k = (s - W.raise) / W.down;
+          const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+          this.wingT = 1.02 - 1.1 * e;   // overshoot below level at the bottom
+          this.fold = Math.max(0, 0.35 * (1 - k * 3));
+        } else if (s < W.raise + W.down + W.recover) {
+          const k = (s - W.raise - W.down) / W.recover;
+          this.wingT = lerp(-0.08, this._passivePose(), PD.easeOutCubic(k));
+          this.fold = Math.sin(k * Math.PI) * 0.45;
+        } else {
+          this.stroke = -1;
+          this.wingV = 0;
+        }
+        this.wingV = 0;
+      }
+      if (this.stroke < 0) {
+        target = this._passivePose();
+        fold = (1 - this.glide) * 0.55;
+        // Flutter: the membrane trembles harder the faster air rushes past.
+        const flut = clamp((airspeed - 180) / 600, 0, 1);
+        target += Math.sin(this.time * (34 + 20 * flut)) * (0.012 + 0.05 * flut);
+        this.wingV += ((target - this.wingT) * stiff - this.wingV * 22) * dt;
+        this.wingT += this.wingV * dt;
+        this.fold += (fold - this.fold) * Math.min(1, dt * 7);
+      }
+      // Far wing trails the near one a touch for depth.
+      this.wingLag += (this.wingT - this.wingLag) * Math.min(1, dt * 30);
+    }
+
+    _passivePose() {
+      if (this.vy < -60) return 0.38;              // coasting up: wings low, swept
+      const gl = this.glide;
+      return lerp(0.86, 0.52, gl);                 // glide spread -> dive tuck
+    }
+
+    /** Tail is a damped spring dragged by vertical velocity changes. */
+    _tail(dt) {
+      const target = clamp(-this.vy / 520, -1, 1);
+      this.tailV += ((target - this.tail) * 90 - this.tailV * 11) * dt;
+      this.tail += this.tailV * dt;
+    }
+
+    _surge(dt) {
+      this.surgeV += (-this.surge * 60 - this.surgeV * 11) * dt;
+      this.surge += this.surgeV * dt;
     }
 
     updateHover(dt, baseY) {
       this._common(dt);
-      this.y = baseY + Math.sin(this.time * 2.6) * 9;
-      this.vy = 0;
-      this.rot = Math.sin(this.time * 2.6 + 1.2) * 0.06;
-      this._wings(dt, 9);
+      // Hovering = a slow rhythm of real wingbeats, the body bobbing with them.
+      const period = 0.62;
+      const prev = this.hoverClock;
+      this.hoverClock = (this.hoverClock + dt) % period;
+      if (this.hoverClock < prev) this.startStroke();
+      const ph = this.hoverClock / period;
+      // Lift right after each downstroke, sink in between.
+      const bob = Math.cos((ph - 0.28) * Math.PI * 2);
+      this.y = baseY - bob * 7 + Math.sin(this.time * 0.9) * 3;
+      this.vy = bob * 70;
+      this.stamina = 1;
+      this.rot += (Math.sin(this.time * 1.3) * 0.05 - this.rot) * Math.min(1, dt * 4);
+      this._wings(dt, 0);
+      this._tail(dt);
     }
 
-    /** Frozen in the air (after un-pausing): animate only. */
+    /** Frozen in the air (after un-pausing): hover in place. */
     updateIdle(dt) {
-      this._common(dt);
-      this._wings(dt, 9);
+      const y = this.y;
+      this.updateHover(dt, this._idleY == null ? (this._idleY = y) : this._idleY);
     }
 
-    updateFly(dt) {
+    updateFly(dt, speed) {
       this._common(dt);
-      this.vy = Math.min(this.vy + CFG.gravity * dt, CFG.maxFall);
+      this._idleY = null;
+      const c = CFG;
+      this.sinceFlap += dt;
+      let g = c.gravity;
+
+      // Downstroke thrust
+      if (this.thrust > 0) {
+        this.vy -= c.flapThrust * Math.min(dt, this.thrust);
+        this.thrust -= dt;
+        if (this.vy < -c.maxClimb) this.vy = -c.maxClimb;
+      } else if (this.vy > -c.apexBand && this.vy < c.apexBand) {
+        // Soft apex: lift from the spread wings briefly offsets gravity.
+        const k = 1 - Math.abs(this.vy) / c.apexBand;
+        g *= 1 - (1 - c.apexGravity) * k * this.glide;
+      }
+
+      // Glide stamina drains once we're descending; wings tuck into a dive.
+      if (this.vy > 0) this.stamina = Math.max(0, this.stamina - dt / c.glideTime);
+
+      // Quadratic air drag. Falling: terminal speed blends glide -> dive.
+      let vy = this.vy + g * dt;
+      if (vy > 0) {
+        const term = lerp(c.diveTerminal, c.glideTerminal, this.glide);
+        vy -= (c.gravity / (term * term)) * vy * vy * dt;
+      } else {
+        vy += c.climbDrag * vy * vy * dt;
+      }
+      this.vy = vy;
       this.y += this.vy * dt;
-      if (this.y < CFG.ceiling) {
-        this.y = CFG.ceiling;
+      if (this.y < c.ceiling) {
+        this.y = c.ceiling;
         if (this.vy < 0) this.vy = 0;
       }
-      const target = clamp(-0.42 + (this.vy - CFG.flapVelocity) / 1150 * 1.4, -0.42, 0.95);
-      this.rot += (target - this.rot) * Math.min(1, dt * (this.vy < 0 ? 16 : 5.5));
-      this._wings(dt, this.vy > 250 ? 16 : 12);
+
+      // Body pitch follows the flight path (velocity direction) through an
+      // under-damped spring, so it leads into climbs and swings into dives.
+      const vx = Math.max(speed || 0, c.pitchRefSpeed);
+      const target = clamp(Math.atan2(this.vy, vx), c.pitchUp, c.pitchDown);
+      this.rotV += ((target - this.rot) * c.pitchStiff - this.rotV * c.pitchDamp) * dt;
+      this.rot += this.rotV * dt;
+
+      this._surge(dt);
+      this.x = this.baseX + this.surge;
+      this._wings(dt, Math.hypot(vx, this.vy));
+      this._tail(dt);
     }
 
     die(onGround) {
@@ -109,7 +247,7 @@
       this._common(dt);
       const rest = groundY - 19 * this.scale / CFG.playScale;
       if (!this.grounded) {
-        this.vy = Math.min(this.vy + CFG.gravity * dt, CFG.maxFall * 1.2);
+        this.vy = Math.min(this.vy + CFG.gravity * dt, CFG.diveTerminal * 1.1);
         this.y += this.vy * dt;
         this.rot += this.spin * dt;
         if (this.y >= rest) {
@@ -146,11 +284,28 @@
       return {
         x: this.x, y: this.y, rot: this.rot, scale: this.scale,
         sx: 1 - 0.08 * sq, sy: 1 + 0.1 * sq,
-        wingT: this.wingT, blink: this.blink, mood: this.mood,
+        wingT: this.wingT, wingLag: this.wingLag, fold: this.fold, tail: this.tail,
+        blink: this.blink, mood: this.mood,
         time: this.time, tint,
       };
     }
+
+    /** World position of the near wing's tip (for trails). */
+    wingTip(out) {
+      // Mirrors drawWing(): pivot (-4,-8), rotation lerp(0.32,-1.5,wingT), tip (-25,-23) scaled by fold
+      const a = lerp(0.32, -1.5, this.wingT);
+      const fx = 1 - 0.3 * this.fold, fy = 1 - 0.42 * this.fold;
+      const lx0 = -25 * fx, ly0 = -23 * fy;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const lx = -4 + lx0 * ca - ly0 * sa, ly = -8 + lx0 * sa + ly0 * ca;
+      const c = Math.cos(this.rot), s = Math.sin(this.rot), k = this.scale;
+      out.x = this.x + (lx * c - ly * s) * k;
+      out.y = this.y + (lx * s + ly * c) * k;
+      return out;
+    }
   }
+  // Wingbeat keyframe durations (seconds)
+  Dragon.STROKE = { raise: 0.03, down: 0.1, recover: 0.24 };
 
   // ---------------------------------------------------------------------------
   // Obstacles + orbs
@@ -186,6 +341,7 @@
 
     update(dt, speed, passed, W, groundY) {
       this.untilNext -= speed * dt;
+      if (PD.lab && !PD.lab.obstacles) this.untilNext = Math.max(this.untilNext, 60);
       if (this.untilNext <= 0) {
         const d = Field.difficulty(passed);
         this.spawn(passed, d, W, groundY);
@@ -289,7 +445,7 @@
   // ---------------------------------------------------------------------------
   // Particles (pooled)
   // ---------------------------------------------------------------------------
-  const K = { PUFF: 0, SPARK: 1, STAR: 2, RING: 3 };
+  const K = { PUFF: 0, SPARK: 1, STAR: 2, RING: 3, ARC: 4, STREAK: 5 };
 
   class Particles {
     constructor() {
@@ -382,6 +538,29 @@
             g.arc(p.x, p.y, p.size, 0, TAU);
             g.stroke();
             break;
+          case K.ARC: {
+            // Downwash crescent: the lower half of a ring, tilted with the body
+            g.globalAlpha = k * 0.55;
+            g.strokeStyle = p.color;
+            g.lineWidth = 1 + 3.5 * k;
+            g.lineCap = 'round';
+            g.beginPath();
+            g.ellipse(p.x, p.y, p.size * 1.25, p.size * 0.55, p.rot, 0.12 * Math.PI, 0.88 * Math.PI);
+            g.stroke();
+            break;
+          }
+          case K.STREAK: {
+            const sp = Math.hypot(p.vx, p.vy) || 1;
+            g.globalAlpha = k * 0.4;
+            g.strokeStyle = p.color;
+            g.lineWidth = 1.5;
+            g.lineCap = 'round';
+            g.beginPath();
+            g.moveTo(p.x, p.y);
+            g.lineTo(p.x - (p.vx / sp) * p.size, p.y - (p.vy / sp) * p.size);
+            g.stroke();
+            break;
+          }
         }
       }
       g.restore();

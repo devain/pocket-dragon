@@ -44,6 +44,12 @@
       this.frozen = false;
       this.sparkleTimer = 0;
       this.gameOverShown = false;
+      this.washTimer = -1;
+      this.streakTimer = 0;
+      // Wing-tip trail: fixed ring buffer, no allocation per frame.
+      this.trail = Array.from({ length: 22 }, () => ({ x: 0, y: 0, w: 0, on: false }));
+      this.trailHead = 0;
+      this.tip = { x: 0, y: 0 };
 
       const $ = (id) => document.getElementById(id);
       this.ui = {
@@ -101,8 +107,8 @@
 
       // Keep the dragon sensible if the window changes mid-session
       if (prevGround !== undefined) {
-        if (this.state === 'title') { this.dragon.x = W / 2; }
-        else if (!this.dragon.tween) this.dragon.x = this.playX;
+        if (this.state === 'title') { this.dragon.x = this.dragon.baseX = W / 2; }
+        else if (!this.dragon.tween) this.dragon.x = this.dragon.baseX = this.playX;
       }
     }
 
@@ -191,13 +197,87 @@
 
     flap() {
       this.dragon.flap();
-      this.audio.flap();
-      const d = this.dragon;
-      for (let i = 0; i < 3; i++) {
-        this.particles.emit(K.PUFF, d.x - 14 + rand(-4, 4), d.y + 8 + rand(-3, 3), {
-          vx: rand(-90, -40), vy: rand(30, 80), life: rand(0.3, 0.45), size: rand(5, 8), grow: 14, drag: 3,
+      this.audio.flap(this.dragon.flapPower);
+      // Downwash appears as the wings sweep down, not on the tap itself.
+      this.washTimer = PD.Dragon.STROKE.raise + PD.Dragon.STROKE.down * 0.45;
+    }
+
+    /** Air pushed down and back by a wingbeat. Stronger when pulling out of a dive. */
+    downwash() {
+      const d = this.dragon, p = d.flapPower, k = d.scale / CFG.playScale;
+      const c = Math.cos(d.rot), s = Math.sin(d.rot);
+      // point under the wing root, in world space
+      const ox = -8 * k, oy = 18 * k;
+      const x = d.x + ox * c - oy * s, y = d.y + ox * s + oy * c;
+      this.particles.emit(K.ARC, x, y, {
+        vx: -60 - 40 * p, vy: 110 + 80 * p, life: 0.32, size: 14 * k, grow: 46, rot: d.rot, color: '#ffffff', drag: 3,
+      });
+      const n = Math.round(2 + 3 * p);
+      for (let i = 0; i < n; i++) {
+        this.particles.emit(K.PUFF, x + rand(-10, 6), y + rand(-3, 4), {
+          vx: rand(-110, -40), vy: rand(50, 130) * (0.7 + 0.5 * p), life: rand(0.3, 0.5), size: rand(4, 7) * k, grow: 16, drag: 3.5,
         });
       }
+    }
+
+    /** Tip trail + speed streaks; called every physics step while airborne. */
+    flightFx(dt, speed) {
+      const d = this.dragon;
+      if (this.washTimer >= 0) {
+        this.washTimer -= dt;
+        if (this.washTimer < 0) this.downwash();
+      }
+      // Trail samples drift back with the world so they read as air, not paint.
+      const dx = speed * dt;
+      for (const p of this.trail) { if (p.on) { p.x -= dx; p.w -= dt * 2.2; if (p.w <= 0) p.on = false; } }
+      if (d.dead) return;
+      const tip = d.wingTip(this.tip);
+      const air = Math.hypot(speed, d.vy);
+      const stroking = d.stroke >= 0 && d.stroke < PD.Dragon.STROKE.raise + PD.Dragon.STROKE.down;
+      const w = clamp((stroking ? 0.75 : 0) + (air - 240) / 700 + (1 - d.glide) * 0.25, 0, 1);
+      const p = this.trail[this.trailHead];
+      this.trailHead = (this.trailHead + 1) % this.trail.length;
+      p.x = tip.x; p.y = tip.y; p.w = w; p.on = w > 0.02;
+
+      // Rushing-air streaks in a committed dive
+      if (d.vy > 480 && this.state === 'playing') {
+        this.streakTimer -= dt;
+        if (this.streakTimer <= 0) {
+          this.streakTimer = 0.05;
+          this.particles.emit(K.STREAK, d.x + rand(-30, 30), d.y + rand(-40, 30), {
+            vx: -speed * 0.4, vy: -d.vy * 0.9, life: 0.18, size: rand(10, 20), color: '#ffffff',
+          });
+        }
+      }
+    }
+
+    drawTrail(g) {
+      const tr = this.trail, n = tr.length;
+      g.save();
+      g.lineCap = 'round';
+      g.strokeStyle = '#ffffff';
+      // oldest -> newest
+      let prev = null;
+      for (let i = 0; i < n; i++) {
+        const p = tr[(this.trailHead + i) % n];
+        if (!p.on) { prev = null; continue; }
+        if (prev) {
+          const age = i / n;
+          g.globalAlpha = Math.min(p.w, prev.w) * 0.45 * age;
+          g.lineWidth = 0.6 + 3 * age * p.w;
+          g.beginPath();
+          g.moveTo(prev.x, prev.y);
+          g.lineTo(p.x, p.y);
+          g.stroke();
+        }
+        prev = p;
+      }
+      g.restore();
+    }
+
+    clearTrail() {
+      for (const p of this.trail) p.on = false;
+      this.washTimer = -1;
     }
 
     toggleSound() {
@@ -248,6 +328,7 @@
       this.field.reset();
       this.particles.clear();
       this.texts.clear();
+      this.clearTrail();
     }
 
     startFromTitle() {
@@ -355,7 +436,22 @@
         this.update(step);
         this.acc -= step;
       }
+      this.updateWind();
       this.render();
+    }
+
+    /** Continuous wind bed: louder and brighter as airspeed builds in a dive. */
+    updateWind() {
+      const d = this.dragon;
+      let level = 0, bright = 0;
+      if (this.state === 'playing' && !this.frozen) {
+        const air = Math.hypot(this.speed, d.vy);
+        level = clamp((air - 200) / 600, 0, 1) * 0.8 + 0.12;
+        bright = clamp(d.vy / 700, 0, 1);
+      } else if (this.state === 'title' || this.state === 'ready') {
+        level = 0.08;
+      }
+      this.audio.setWind(level, bright);
     }
 
     update(dt) {
@@ -380,18 +476,22 @@
         case 'title':
           d.updateHover(dt, this.groundY * 0.52);
           this.ambientSparkles(dt);
+          this.flightFx(dt, speed);
           break;
         case 'ready':
           d.updateHover(dt, this.readyY);
+          this.flightFx(dt, speed);
           break;
         case 'playing':
           if (this.frozen) { d.updateIdle(dt); break; }
-          d.updateFly(dt);
+          d.updateFly(dt, speed);
+          this.flightFx(dt, speed);
           this.field.update(dt, speed, this.passed, this.W, this.groundY);
           this.collectOrbs(dt);
           this.checkCollisions();
           break;
         case 'dying':
+          this.flightFx(dt, 0);
           d.updateDead(dt, this.groundY);
           if (d.grounded && this.stateTime > 0.6) this.enterGameOver();
           break;
@@ -511,6 +611,7 @@
       }
 
       this.particles.draw(g, this.sprites, false);
+      this.drawTrail(g);
 
       // Dragon (+ collect glow, + hit flash)
       const d = this.dragon;

@@ -80,6 +80,22 @@
         this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
         const data = this.noiseBuf.getChannelData(0);
         for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+
+        // Wind bed: looped noise -> bandpass -> gain, driven by airspeed.
+        const wind = ctx.createBufferSource();
+        wind.buffer = this.noiseBuf;
+        wind.loop = true;
+        this.windFilter = ctx.createBiquadFilter();
+        this.windFilter.type = 'bandpass';
+        this.windFilter.frequency.value = 500;
+        this.windFilter.Q.value = 0.8;
+        this.windGain = ctx.createGain();
+        this.windGain.gain.value = 0;
+        wind.connect(this.windFilter);
+        this.windFilter.connect(this.windGain);
+        this.windGain.connect(this.sfx);
+        wind.start();
+        this._wind = -1;
       }
       if (this.ctx.state === 'suspended') this.ctx.resume();
       return true;
@@ -147,12 +163,26 @@
     }
 
     // --- Sound effects ---------------------------------------------------------
-    flap() {
+    /** power ~0.4 (lazy beat at the apex) .. 1.4 (hauling out of a dive). */
+    flap(power) {
       if (!this.ready) return;
+      const pw = power == null ? 1 : power;
       const t = this.ctx.currentTime;
-      const p = PD.rand(0.92, 1.08);
-      this.noise(t, 0.13, { filter: 'bandpass', freq: 1300 * p, freqTo: 380, q: 1.2, vol: 0.32 });
-      this.tone(210 * p, t, 0.09, { type: 'sine', slideTo: 120, vol: 0.16 });
+      const p = PD.rand(0.93, 1.07);
+      // Leathery whoosh on the downstroke, a soft body thump under it.
+      this.noise(t + 0.02, 0.16, { filter: 'bandpass', freq: (1500 - 300 * pw) * p, freqTo: 320, q: 1.1, vol: 0.2 + 0.12 * pw, attack: 0.02 });
+      this.tone((230 - 40 * pw) * p, t + 0.025, 0.1, { type: 'sine', slideTo: 105, vol: 0.1 + 0.07 * pw, attack: 0.01 });
+    }
+
+    /** level 0..1 loudness, bright 0..1 pitch of the rushing air. */
+    setWind(level, bright) {
+      if (!this.windGain) return;
+      const q = Math.round(level * 40) + Math.round(bright * 10) * 100;
+      if (q === this._wind) return; // avoid flooding automation events
+      this._wind = q;
+      const t = this.ctx.currentTime;
+      this.windGain.gain.setTargetAtTime(level * 0.16, t, 0.12);
+      this.windFilter.frequency.setTargetAtTime(380 + 1100 * bright + 300 * level, t, 0.15);
     }
 
     collect(combo) {

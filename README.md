@@ -43,8 +43,25 @@ js/audio.js       Web Audio synth SFX + procedural music loop
 js/art.js         procedural art: dragon, obstacles, orbs, pre-rendered parallax
 js/entities.js    Dragon, Field (obstacles + orbs), Particles, FloatTexts
 js/game.js        state machine, fixed-step loop, input, rendering, HUD
+js/lab.js         dev-only flight lab (index.html?lab)
 js/main.js        bootstrap
 ```
 
-To tune the feel, edit `js/config.js`. Useful values: `gravity`, `flapVelocity`,
+## Flight model
+
+The dragon is meant to feel like a creature with wings, not a bouncing ball:
+
+- **Wingbeat.** A tap gives an instant kick so the dragon responds right away. A short downstroke then adds thrust, which gives the flap its weight. Some momentum carries over: flapping again while climbing stacks a little, and flapping out of a dive has to cancel the fall first.
+- **Soft apex and glide.** Near the top of each arc the spread wings ease gravity. While descending, quadratic drag caps the fall at a slow glide speed. After a moment the wings tuck and the drag fades into a committed dive.
+- **Pitch.** The body points along its actual flight path, driven by a slightly bouncy spring, and each wingbeat gives the nose a small upward kick.
+- **Animation.** The wings follow keyframes on each beat: snap up, full downstroke, then a folded recovery. Between beats they settle into a spread glide pose or a swept-back dive tuck, and flutter faster at higher speed. The tail lags behind the motion.
+- **Effects.** A downwash crescent and puffs appear at the moment of the downstroke, the wingtips leave trails, and a dive shows speed streaks. A wind sound rises and brightens as the dragon picks up speed.
+
+**Flight lab:** open `index.html?lab` to fly with no obstacles and adjust the
+flight values live. The panel also has buttons for the candidate settings that
+were compared, including the original V1 feel. You can switch obstacles back on
+from the panel.
+
+To tune the feel, edit `js/config.js`. Flight values: `gravity`, `flapKick`,
+`flapThrust`, `glideTerminal`, `glideTime`, `apexGravity`. Difficulty values:
 `gapMin/gapMax`, `speedMin/speedMax`, `rampPasses`.
